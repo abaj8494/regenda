@@ -138,8 +138,36 @@ fn update(
                 tz,
             ));
         }
+        if !loading.needs_oauth.is_empty() {
+            // Start OAuth flow for the first pending Google source
+            let server_name = loading.needs_oauth[0].clone();
+            if let Some(server_config) = config.sources.get(&server_name) {
+                return Box::new(OAuthScene::new(
+                    server_name,
+                    server_config,
+                    strings,
+                ));
+            }
+        }
         if loading.retry_pressed {
             // Retry fetch
+            let status_clone = fetch_status.clone();
+            let config_clone = config.clone();
+            *fetch_status.lock().unwrap() = FetchStatus::Loading {
+                message: strings.loading.to_string(),
+            };
+            std::thread::spawn(move || {
+                let result = caldav::fetch_all(&config_clone);
+                *status_clone.lock().unwrap() = result;
+            });
+            return Box::new(LoadingScene::new(fetch_status.clone(), strings));
+        }
+    }
+
+    // OAuth scene transitions
+    if let Some(oauth) = scene.downcast_ref::<OAuthScene>() {
+        if oauth.auth_complete || oauth.cancel_pressed {
+            // Re-fetch all calendars (token is now stored)
             let status_clone = fetch_status.clone();
             let config_clone = config.clone();
             *fetch_status.lock().unwrap() = FetchStatus::Loading {

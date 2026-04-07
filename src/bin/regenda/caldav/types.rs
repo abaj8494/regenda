@@ -92,4 +92,6 @@ pub enum FetchStatus {
     Loading { message: String },
     Done { calendars: Vec<CalendarInfo>, events: Vec<Event> },
     Error { message: String },
+    /// One or more Google sources need OAuth device authorization.
+    NeedsOAuth { server_names: Vec<String> },
 }

@@ -2,20 +2,32 @@ timezone: UTC       # see https://en.wikipedia.org/wiki/List_of_tz_database_time
 language: en        # "en" for English, "cs" for Czech
 
 sources:
-  Personal:         # Name of server (can be anything, but must be unique)
-    type: server
-    user: "your user name"
-    url: "https://your-caldav-server.com/dav"
-    password: "your password"
-  #Work:
+  # === Google Calendar (OAuth 2.0) ===
+  # Get client_id and client_secret from Google API Console:
+  # 1. Go to https://console.cloud.google.com/apis/credentials
+  # 2. Create OAuth 2.0 Client ID (type: TV / Limited Input Device)
+  # 3. Enable "CalDAV API" in API Library
+  Google:
+    type: google
+    client_id: "your-client-id.apps.googleusercontent.com"
+    client_secret: "your-client-secret"
+    # calendar_id: List of calendar IDs to fetch (default: ["primary"])
+    # Your primary calendar ID is your Gmail address.
+    # Find other IDs in Google Calendar > Settings > Calendar settings > Calendar ID
+    calendar_id:
+      - "primary"
+    #  - "family123@group.calendar.google.com"
+
+  # === Standard CalDAV server (Basic auth) ===
+  #Personal:
   #  type: server
+  #  url: "https://your-caldav-server.com/dav"
   #  user: "your user name"
-  #  url: "https://work-caldav-server.com/dav"
   #  password: "your password"
 
-# iCloud example:
-#  iCloud:
-#    type: server
-#    user: "your@apple.id"
-#    url: "https://caldav.icloud.com"
-#    password: "your-app-specific-password"
+  # === iCloud example ===
+  #iCloud:
+  #  type: server
+  #  url: "https://caldav.icloud.com"
+  #  user: "your@apple.id"
+  #  password: "your-app-specific-password"

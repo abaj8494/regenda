@@ -1,29 +1,105 @@
+use super::google_oauth;
+use super::ical;
 use super::parser;
 use super::types::{CalendarInfo, Event, FetchStatus};
-use super::ical;
 use crate::config::Config;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{Duration, NaiveDate, Utc};
 
+const GOOGLE_CALDAV_BASE: &str = "https://apidata.googleusercontent.com/caldav/v2";
+
+/// Auth method for a CalDAV request.
+enum Auth {
+    Basic { username: String, password: String },
+    Bearer { token: String },
+}
+
 /// Fetch all calendars and events from configured CalDAV servers.
+/// For Google sources, `pending_oauth` is populated with server names that need
+/// the device authorization flow (no stored refresh token).
 pub fn fetch_all(config: &Config) -> FetchStatus {
     let mut all_calendars = Vec::new();
     let mut all_events = Vec::new();
     let mut errors = Vec::new();
+    let mut pending_oauth: Vec<String> = Vec::new();
 
     for (server_name, server_config) in &config.sources {
-        log::info!("Fetching from server: {}", server_name);
+        log::info!("Fetching from source: {} (type: {})", server_name, server_config.r#type);
 
-        match fetch_server(server_name, &server_config.url, &server_config.user, &server_config.password) {
-            Ok((cals, evts)) => {
-                all_calendars.extend(cals);
-                all_events.extend(evts);
+        if server_config.is_google() {
+            let client_id = match &server_config.client_id {
+                Some(id) => id.clone(),
+                None => {
+                    errors.push(format!("{}: missing client_id", server_name));
+                    continue;
+                }
+            };
+            let client_secret = match &server_config.client_secret {
+                Some(s) => s.clone(),
+                None => {
+                    errors.push(format!("{}: missing client_secret", server_name));
+                    continue;
+                }
+            };
+
+            // Try to get a valid access token (from stored refresh token)
+            match google_oauth::get_access_token(server_name, &client_id, &client_secret) {
+                Ok(Some(access_token)) => {
+                    let calendar_ids = server_config
+                        .calendar_id
+                        .clone()
+                        .unwrap_or_else(|| vec!["primary".to_string()]);
+
+                    match fetch_google(server_name, &access_token, &calendar_ids) {
+                        Ok((cals, evts)) => {
+                            all_calendars.extend(cals);
+                            all_events.extend(evts);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to fetch from Google {}: {:?}", server_name, e);
+                            errors.push(format!("{}: {}", server_name, e));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // No stored token — need device auth flow
+                    log::info!("Google source {} needs OAuth authorization", server_name);
+                    pending_oauth.push(server_name.clone());
+                }
+                Err(e) => {
+                    log::error!("OAuth error for {}: {:?}", server_name, e);
+                    errors.push(format!("{}: {}", server_name, e));
+                }
             }
-            Err(e) => {
-                log::error!("Failed to fetch from {}: {:?}", server_name, e);
-                errors.push(format!("{}: {}", server_name, e));
+        } else {
+            // Standard CalDAV server with basic auth
+            let url = match &server_config.url {
+                Some(u) => u.clone(),
+                None => {
+                    errors.push(format!("{}: missing url", server_name));
+                    continue;
+                }
+            };
+            let user = server_config.user.clone().unwrap_or_default();
+            let password = server_config.password.clone().unwrap_or_default();
+
+            match fetch_server(server_name, &url, &user, &password) {
+                Ok((cals, evts)) => {
+                    all_calendars.extend(cals);
+                    all_events.extend(evts);
+                }
+                Err(e) => {
+                    log::error!("Failed to fetch from {}: {:?}", server_name, e);
+                    errors.push(format!("{}: {}", server_name, e));
+                }
             }
         }
+    }
+
+    if !pending_oauth.is_empty() {
+        return FetchStatus::NeedsOAuth {
+            server_names: pending_oauth,
+        };
     }
 
     if all_calendars.is_empty() && !errors.is_empty() {
@@ -39,6 +115,81 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
     }
 }
 
+/// Fetch events from Google CalDAV using OAuth bearer token.
+fn fetch_google(
+    server_name: &str,
+    access_token: &str,
+    calendar_ids: &[String],
+) -> Result<(Vec<CalendarInfo>, Vec<Event>)> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let auth = Auth::Bearer {
+        token: access_token.to_string(),
+    };
+
+    let mut calendars = Vec::new();
+    let mut all_events = Vec::new();
+
+    for cal_id in calendar_ids {
+        let cal_url = format!("{}/{}/events", GOOGLE_CALDAV_BASE, cal_id);
+
+        // Try PROPFIND to get calendar display name
+        let cal_name = match propfind_displayname(&client, &cal_url, &auth) {
+            Ok(Some(name)) => name,
+            Ok(None) => cal_id.clone(),
+            Err(_) => cal_id.clone(),
+        };
+
+        calendars.push(CalendarInfo {
+            name: cal_name.clone(),
+            path: cal_id.clone(),
+            color: None,
+            visible: true,
+            server_name: server_name.to_string(),
+        });
+
+        // Fetch events via REPORT
+        match fetch_calendar_events_with_auth(&client, &cal_url, &auth, &cal_name) {
+            Ok(events) => all_events.extend(events),
+            Err(e) => log::warn!("Failed to fetch events from Google calendar {}: {:?}", cal_id, e),
+        }
+    }
+
+    Ok((calendars, all_events))
+}
+
+fn propfind_displayname(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    auth: &Auth,
+) -> Result<Option<String>> {
+    let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:displayname/>
+  </d:prop>
+</d:propfind>"#;
+
+    let mut req = client
+        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
+        .header("Depth", "0")
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(xml);
+
+    req = apply_auth(req, auth);
+
+    let resp = req.send().context("PROPFIND for displayname failed")?;
+    let body = resp.text()?;
+
+    let parsed = parser::parse_propfind_calendars(&body)?;
+    Ok(parsed.first().and_then(|c| c.display_name.clone()))
+}
+
+// ---- Standard CalDAV (basic auth) ----
+
 fn fetch_server(
     server_name: &str,
     url: &str,
@@ -50,23 +201,31 @@ fn fetch_server(
         .build()
         .context("Failed to build HTTP client")?;
 
+    let auth = Auth::Basic {
+        username: username.to_string(),
+        password: password.to_string(),
+    };
+
     // Step 1: Discover the principal URL
-    let principal_url = discover_principal(&client, url, username, password)?;
+    let principal_url = discover_principal(&client, url, &auth)?;
 
     // Step 2: Discover calendar home
-    let calendar_home = discover_calendar_home(&client, &principal_url, username, password)?;
+    let calendar_home = discover_calendar_home(&client, &principal_url, &auth)?;
 
     // Step 3: List calendars
     let propfind_xml = build_calendar_propfind();
-    let resp = client
-        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &calendar_home)
-        .basic_auth(username, Some(password))
+    let mut req = client
+        .request(
+            reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
+            &calendar_home,
+        )
         .header("Depth", "1")
         .header("Content-Type", "application/xml; charset=utf-8")
-        .body(propfind_xml)
-        .send()
-        .context("PROPFIND for calendars failed")?;
+        .body(propfind_xml);
 
+    req = apply_auth(req, &auth);
+
+    let resp = req.send().context("PROPFIND for calendars failed")?;
     let body = resp.text().context("Failed to read PROPFIND response")?;
     let parsed = parser::parse_propfind_calendars(&body)?;
 
@@ -92,8 +251,7 @@ fn fetch_server(
             server_name: server_name.to_string(),
         });
 
-        // Step 4: Fetch events for this calendar
-        match fetch_calendar_events(&client, &cal_url, username, password, &cal_name) {
+        match fetch_calendar_events_with_auth(&client, &cal_url, &auth, &cal_name) {
             Ok(events) => all_events.extend(events),
             Err(e) => log::warn!("Failed to fetch events from {}: {:?}", cal_name, e),
         }
@@ -105,8 +263,7 @@ fn fetch_server(
 fn discover_principal(
     client: &reqwest::blocking::Client,
     url: &str,
-    username: &str,
-    password: &str,
+    auth: &Auth,
 ) -> Result<String> {
     let xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:">
@@ -115,22 +272,20 @@ fn discover_principal(
   </d:prop>
 </d:propfind>"#;
 
-    let resp = client
+    let mut req = client
         .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
-        .basic_auth(username, Some(password))
         .header("Depth", "0")
         .header("Content-Type", "application/xml; charset=utf-8")
-        .body(xml)
-        .send()
-        .context("PROPFIND for principal failed")?;
+        .body(xml);
 
+    req = apply_auth(req, auth);
+
+    let resp = req.send().context("PROPFIND for principal failed")?;
     let body = resp.text()?;
 
-    // Extract principal href from response
     if let Some(href) = extract_href_from_tag(&body, "current-user-principal") {
         Ok(resolve_url(url, &href))
     } else {
-        // Fall back to using the provided URL as-is
         Ok(url.to_string())
     }
 }
@@ -138,8 +293,7 @@ fn discover_principal(
 fn discover_calendar_home(
     client: &reqwest::blocking::Client,
     principal_url: &str,
-    username: &str,
-    password: &str,
+    auth: &Auth,
 ) -> Result<String> {
     let xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -148,33 +302,33 @@ fn discover_calendar_home(
   </d:prop>
 </d:propfind>"#;
 
-    let resp = client
+    let mut req = client
         .request(
             reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
             principal_url,
         )
-        .basic_auth(username, Some(password))
         .header("Depth", "0")
         .header("Content-Type", "application/xml; charset=utf-8")
-        .body(xml)
+        .body(xml);
+
+    req = apply_auth(req, auth);
+
+    let resp = req
         .send()
         .context("PROPFIND for calendar-home-set failed")?;
-
     let body = resp.text()?;
 
     if let Some(href) = extract_href_from_tag(&body, "calendar-home-set") {
         Ok(resolve_url(principal_url, &href))
     } else {
-        // Fall back to principal URL
         Ok(principal_url.to_string())
     }
 }
 
-fn fetch_calendar_events(
+fn fetch_calendar_events_with_auth(
     client: &reqwest::blocking::Client,
     calendar_url: &str,
-    username: &str,
-    password: &str,
+    auth: &Auth,
     calendar_name: &str,
 ) -> Result<Vec<Event>> {
     let now = Utc::now().date_naive();
@@ -183,18 +337,18 @@ fn fetch_calendar_events(
 
     let report_xml = build_calendar_report(start, end);
 
-    let resp = client
+    let mut req = client
         .request(
             reqwest::Method::from_bytes(b"REPORT").unwrap(),
             calendar_url,
         )
-        .basic_auth(username, Some(password))
         .header("Depth", "1")
         .header("Content-Type", "application/xml; charset=utf-8")
-        .body(report_xml)
-        .send()
-        .context("REPORT for calendar events failed")?;
+        .body(report_xml);
 
+    req = apply_auth(req, auth);
+
+    let resp = req.send().context("REPORT for calendar events failed")?;
     let body = resp.text().context("Failed to read REPORT response")?;
 
     let parsed = parser::parse_report_events(&body)?;
@@ -206,6 +360,18 @@ fn fetch_calendar_events(
     }
 
     Ok(events)
+}
+
+// ---- Helpers ----
+
+fn apply_auth(
+    req: reqwest::blocking::RequestBuilder,
+    auth: &Auth,
+) -> reqwest::blocking::RequestBuilder {
+    match auth {
+        Auth::Basic { username, password } => req.basic_auth(username, Some(password)),
+        Auth::Bearer { token } => req.bearer_auth(token),
+    }
 }
 
 fn build_calendar_propfind() -> String {
@@ -244,13 +410,11 @@ fn build_calendar_report(start: NaiveDate, end: NaiveDate) -> String {
     )
 }
 
-/// Resolve a potentially relative URL against a base URL.
 fn resolve_url(base: &str, href: &str) -> String {
     if href.starts_with("http://") || href.starts_with("https://") {
         return href.to_string();
     }
 
-    // Extract scheme + host from base
     if let Some(scheme_end) = base.find("://") {
         let after_scheme = &base[scheme_end + 3..];
         if let Some(path_start) = after_scheme.find('/') {
@@ -261,21 +425,17 @@ fn resolve_url(base: &str, href: &str) -> String {
         }
     }
 
-    // Fall back: just append
     let base_trimmed = base.trim_end_matches('/');
     let href_trimmed = href.trim_start_matches('/');
     format!("{}/{}", base_trimmed, href_trimmed)
 }
 
-/// Simple extraction of href from within a specific XML tag.
 fn extract_href_from_tag(xml: &str, tag: &str) -> Option<String> {
-    // Find the tag (with any namespace prefix)
     let tag_pattern = format!(":{}", tag);
     let tag_pattern2 = format!("<{}", tag);
 
     let tag_start = xml.find(&tag_pattern).or_else(|| xml.find(&tag_pattern2))?;
 
-    // Find the next <href> or <d:href> after this tag
     let rest = &xml[tag_start..];
     let href_start = rest.find(":href>").or_else(|| rest.find("<href>"))?;
     let content_start = rest[href_start..].find('>')? + href_start + 1;

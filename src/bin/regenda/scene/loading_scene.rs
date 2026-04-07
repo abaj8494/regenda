@@ -11,6 +11,8 @@ pub struct LoadingScene {
     pub has_error: bool,
     pub error_message: String,
     pub retry_pressed: bool,
+    /// Google sources that need OAuth device authorization.
+    pub needs_oauth: Vec<String>,
     retry_hitbox: mxcfb_rect,
     strings: &'static Strings,
     drawn: bool,
@@ -24,6 +26,7 @@ impl LoadingScene {
             has_error: false,
             error_message: String::new(),
             retry_pressed: false,
+            needs_oauth: Vec::new(),
             retry_hitbox: mxcfb_rect::default(),
             strings,
             drawn: false,
@@ -54,6 +57,10 @@ impl Scene for LoadingScene {
             FetchStatus::Error { message } => {
                 self.has_error = true;
                 self.error_message = message.clone();
+            }
+            FetchStatus::NeedsOAuth { server_names } => {
+                self.needs_oauth = server_names.clone();
+                return;
             }
             FetchStatus::Loading { .. } => {}
         }
