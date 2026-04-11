@@ -78,6 +78,31 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
                     errors.push(format!("{}: {}", server_name, e));
                 }
             }
+        } else if server_config.is_ics() {
+            let url = match &server_config.url {
+                Some(u) => u.clone(),
+                None => {
+                    errors.push(format!("{}: missing url", server_name));
+                    continue;
+                }
+            };
+
+            match fetch_ics(server_name, &url, server_config) {
+                Ok((cals, evts)) => {
+                    log::info!(
+                        "ICS {}: fetched {} calendars, {} events",
+                        server_name,
+                        cals.len(),
+                        evts.len()
+                    );
+                    all_calendars.extend(cals);
+                    all_events.extend(evts);
+                }
+                Err(e) => {
+                    log::error!("Failed to fetch ICS from {}: {:?}", server_name, e);
+                    errors.push(format!("{}: {}", server_name, e));
+                }
+            }
         } else {
             let url = match &server_config.url {
                 Some(u) => u.clone(),
@@ -839,6 +864,82 @@ fn fetch_calendar_events_with_auth(
     }
 
     Ok(events)
+}
+
+// ---- Static iCalendar subscription (type: ics) ----
+
+/// Fetch a static iCalendar feed (e.g. a `webcal://` subscription URL).
+///
+/// These are not CalDAV endpoints — they're just a single `.ics` file served
+/// over HTTP(S). We do one GET, parse the body via `ical::parse_ical_events`,
+/// and filter to the same date window as the CalDAV paths.
+fn fetch_ics(
+    server_name: &str,
+    url: &str,
+    server_config: &ServerConfig,
+) -> Result<(Vec<CalendarInfo>, Vec<Event>)> {
+    // `webcal://` is a pseudo-scheme meaning "fetch this as HTTPS".
+    // `reqwest` can't speak it, so rewrite before sending.
+    let http_url = if let Some(rest) = url.strip_prefix("webcal://") {
+        format!("https://{}", rest)
+    } else if let Some(rest) = url.strip_prefix("webcals://") {
+        format!("https://{}", rest)
+    } else {
+        url.to_string()
+    };
+
+    log::info!("ICS {}: fetching {}", server_name, http_url);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let resp = client
+        .get(&http_url)
+        .send()
+        .with_context(|| format!("GET {} failed", http_url))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        bail!("ICS fetch returned HTTP {}", status);
+    }
+
+    let ical_data = resp.text().context("Failed to read ICS body")?;
+    log::info!("ICS {}: fetched {} bytes", server_name, ical_data.len());
+
+    let cal_name = server_config
+        .resolve_display_name(server_name)
+        .unwrap_or_else(|| server_name.to_string());
+
+    let calendar = CalendarInfo {
+        name: cal_name.clone(),
+        path: http_url.clone(),
+        color: None,
+        visible: true,
+        server_name: server_name.to_string(),
+    };
+
+    let mut events = ical::parse_ical_events(&ical_data, &cal_name, None);
+
+    // ICS feeds are static files — we already downloaded everything, so there's
+    // no reason to clamp hard like the CalDAV paths do. Use a wide window that
+    // covers any reasonable navigation (a full academic year ahead, a quarter back).
+    let now = Utc::now().date_naive();
+    let range_start = now - Duration::days(90);
+    let range_end = now + Duration::days(365);
+    events.retain(|e| {
+        let d = e.start.date_naive();
+        d >= range_start && d <= range_end
+    });
+
+    log::info!(
+        "ICS {}: {} events in range",
+        server_name,
+        events.len()
+    );
+
+    Ok((vec![calendar], events))
 }
 
 // ---- Helpers ----

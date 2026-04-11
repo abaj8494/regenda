@@ -11,13 +11,15 @@ pub struct Config {
     pub sources: HashMap<String, ServerConfig>,
 }
 
-/// A source can be either a CalDAV server (basic auth) or Google (OAuth 2.0).
+/// A source can be a CalDAV server (basic auth), Google (OAuth 2.0), or a
+/// static iCalendar subscription URL (`type: ics`, e.g. `webcal://` feeds).
 #[derive(Deserialize, Clone, Debug)]
 pub struct ServerConfig {
     #[serde(default = "default_type")]
     pub r#type: String,
 
     // CalDAV server fields (type: server)
+    // Also used by ICS subscriptions (type: ics) to hold the feed URL.
     pub url: Option<String>,
     pub user: Option<String>,
     pub password: Option<String>,
@@ -39,6 +41,10 @@ fn default_type() -> String {
 impl ServerConfig {
     pub fn is_google(&self) -> bool {
         self.r#type == "google"
+    }
+
+    pub fn is_ics(&self) -> bool {
+        self.r#type == "ics"
     }
 
     /// Resolve a display name for a calendar ID. Matches exact or substring.
