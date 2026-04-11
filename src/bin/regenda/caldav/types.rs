@@ -1,3 +1,4 @@
+use crate::canvas::color;
 use chrono::{DateTime, NaiveDate, Utc};
 
 /// Information about a discovered calendar.
@@ -20,7 +21,20 @@ pub struct Event {
     pub location: Option<String>,
     pub description: Option<String>,
     pub calendar_name: String,
+    pub calendar_color: Option<color>,
     pub all_day: bool,
+}
+
+/// Parse a hex color string like "#0B8043" or "#0B8043FF" into a color.
+pub fn parse_hex_color(hex: &str) -> Option<color> {
+    let hex = hex.trim().trim_start_matches('#');
+    if hex.len() < 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(color { r, g, b })
 }
 
 impl Event {

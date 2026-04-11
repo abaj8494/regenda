@@ -1,18 +1,19 @@
 use super::types::Event;
+use crate::canvas::color;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use ical::parser::ical::component::IcalEvent;
 use ical::parser::ical::IcalParser;
 
 
 /// Parse iCalendar data and extract events.
-pub fn parse_ical_events(ical_data: &str, calendar_name: &str) -> Vec<Event> {
+pub fn parse_ical_events(ical_data: &str, calendar_name: &str, calendar_color: Option<color>) -> Vec<Event> {
     let reader = std::io::BufReader::new(ical_data.as_bytes());
     let parser = IcalParser::new(reader);
     let mut events = Vec::new();
 
     for calendar in parser.flatten() {
         for vevent in calendar.events {
-            if let Some(event) = parse_vevent(&vevent, calendar_name) {
+            if let Some(event) = parse_vevent(&vevent, calendar_name, calendar_color) {
                 events.push(event);
             }
         }
@@ -21,7 +22,7 @@ pub fn parse_ical_events(ical_data: &str, calendar_name: &str) -> Vec<Event> {
     events
 }
 
-fn parse_vevent(vevent: &IcalEvent, calendar_name: &str) -> Option<Event> {
+fn parse_vevent(vevent: &IcalEvent, calendar_name: &str, calendar_color: Option<color>) -> Option<Event> {
     let mut summary = String::new();
     let mut uid = String::new();
     let mut dtstart_str = None;
@@ -87,6 +88,7 @@ fn parse_vevent(vevent: &IcalEvent, calendar_name: &str) -> Option<Event> {
         location,
         description,
         calendar_name: calendar_name.to_string(),
+        calendar_color,
         all_day,
     })
 }
