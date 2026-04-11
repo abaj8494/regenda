@@ -178,7 +178,8 @@ impl Scene for EventScene {
             y += 55.0;
         }
 
-        // Calendar name
+        // Calendar name (use calendar's own color if available)
+        let cal_color = self.event.calendar_color.unwrap_or(color::ACCENT);
         let cal_str = format!("{}{}", self.strings.calendar_label, self.event.calendar_name);
         canvas.draw_text_colored(
             Point2 {
@@ -187,7 +188,7 @@ impl Scene for EventScene {
             },
             &cal_str,
             34.0,
-            color::ACCENT,
+            cal_color,
         );
         y += 55.0;
 

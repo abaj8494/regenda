@@ -140,69 +140,90 @@ impl Canvas {
         line_spacing: f32,
         c: color,
     ) -> mxcfb_rect {
-        let text_length = text.chars().count();
+        if text.is_empty() {
+            return mxcfb_rect {
+                top: 0,
+                left: 0,
+                width: 0,
+                height: 0,
+            };
+        }
 
-        if text_length > 0 {
-            let spaces_in_text = text.chars().enumerate().fold(vec![], |mut acc, p| {
-                if p.1 == ' ' {
-                    acc.push(p.0);
+        let x = x_pos.unwrap_or(40);
+        let mut text_rects = Vec::new();
+        let mut last_text_height = 0;
+        let mut last_text_y = y_pos;
+        let line_height_extra = (size * line_spacing) as i32;
+
+        // Split on real newlines first, then word-wrap each paragraph
+        let paragraphs: Vec<&str> = text.split('\n').collect();
+
+        'outer: for paragraph in &paragraphs {
+            let paragraph = paragraph.trim_end_matches('\r');
+            if paragraph.is_empty() {
+                // Blank line — just advance Y
+                last_text_y += last_text_height.max((size as i32) + line_height_extra);
+                last_text_height = 0;
+                continue;
+            }
+
+            let words: Vec<&str> = paragraph.split_whitespace().collect();
+            let mut line = String::new();
+
+            for word in &words {
+                let candidate = if line.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{} {}", line, word)
+                };
+
+                if candidate.chars().count() > max_chars_per_line && !line.is_empty() {
+                    // Flush current line
+                    let y = last_text_y + last_text_height;
+                    let text_rect = self.draw_text_colored(
+                        Point2 { x: x as f32, y: y as f32 },
+                        &line,
+                        size,
+                        c,
+                    );
+                    last_text_height = text_rect.height as i32 + line_height_extra;
+                    last_text_y = text_rect.top as i32;
+                    text_rects.push(text_rect);
+                    if text_rects.len() >= max_lines {
+                        break 'outer;
+                    }
+                    line = word.to_string();
+                } else {
+                    line = candidate;
                 }
-                acc
-            });
-            let mut text_rects = Vec::new();
-            let mut peekable = text.chars().peekable();
+            }
 
-            let mut last_text_height = 0;
-            let mut last_text_y = y_pos;
-            let mut chars_taken_so_far = 0;
-
-            while peekable.peek().is_some() {
-                let mut chars_to_take: usize = max_chars_per_line;
-                if chars_taken_so_far + max_chars_per_line >= text_length {
-                    chars_to_take = (text_length + 1) - chars_taken_so_far;
-                } else if text_rects.len() != max_lines - 1 {
-                    chars_to_take = match spaces_in_text
-                        .iter()
-                        .rev()
-                        .find(|char| **char < chars_taken_so_far + max_chars_per_line)
-                    {
-                        None => max_chars_per_line,
-                        Some(chars) => chars - (chars_taken_so_far - 1),
-                    };
-                    chars_taken_so_far += chars_to_take;
-                }
-                let chunk: String = peekable.by_ref().take(chars_to_take).collect();
-
-                let x = x_pos.unwrap_or(40);
+            // Flush remaining text in paragraph
+            if !line.is_empty() {
                 let y = last_text_y + last_text_height;
                 let text_rect = self.draw_text_colored(
-                    Point2 {
-                        x: x as f32,
-                        y: y as f32,
-                    },
-                    chunk.as_str(),
+                    Point2 { x: x as f32, y: y as f32 },
+                    &line,
                     size,
                     c,
                 );
-                last_text_height = text_rect.height as i32 + (size * line_spacing) as i32;
+                last_text_height = text_rect.height as i32 + line_height_extra;
                 last_text_y = text_rect.top as i32;
                 text_rects.push(text_rect);
-                if text_rects.len() == max_lines {
-                    break;
+                if text_rects.len() >= max_lines {
+                    break 'outer;
                 }
             }
+        }
+
+        if text_rects.is_empty() {
+            mxcfb_rect { top: 0, left: 0, width: 0, height: 0 }
+        } else {
             mxcfb_rect {
                 top: text_rects.first().unwrap().top,
                 left: text_rects.iter().map(|&rec| rec.left).min().unwrap(),
                 width: text_rects.iter().map(|&rec| rec.width).max().unwrap(),
                 height: text_rects.iter().map(|&rec| rec.height).sum(),
-            }
-        } else {
-            mxcfb_rect {
-                top: 0,
-                left: 0,
-                width: 0,
-                height: 0,
             }
         }
     }

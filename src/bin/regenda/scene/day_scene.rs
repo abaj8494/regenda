@@ -14,6 +14,7 @@ const MARGIN: u32 = 40;
 pub struct DayScene {
     pub current_date: NaiveDate,
     pub events: Vec<Event>,
+    all_events: Vec<Event>,
     pub calendars: Vec<CalendarInfo>,
     pub go_to_month: bool,
     pub go_to_settings: bool,
@@ -52,6 +53,7 @@ impl DayScene {
         DayScene {
             current_date: date,
             events,
+            all_events: all_events.to_vec(),
             calendars,
             go_to_month: false,
             go_to_settings: false,
@@ -146,8 +148,7 @@ impl Scene for DayScene {
         self.needs_redraw = false;
 
         // Re-filter events for current date
-        let events_clone = self.events.clone();
-        let _ = &events_clone; // keep borrow checker happy
+        self.events = filter_events(&self.all_events, self.current_date, &self.calendars, &self.tz);
 
         canvas.clear();
         let dw = canvas.display_width();
@@ -312,7 +313,8 @@ impl Scene for DayScene {
                     );
                 }
 
-                // Calendar name
+                // Calendar name (use calendar's own color if available)
+                let cal_color = event.calendar_color.unwrap_or(color::ACCENT);
                 canvas.draw_text_colored(
                     Point2 {
                         x: text_x,
@@ -320,7 +322,7 @@ impl Scene for DayScene {
                     },
                     &event.calendar_name,
                     28.0,
-                    color::ACCENT,
+                    cal_color,
                 );
 
                 // Divider line
